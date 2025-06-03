@@ -76,9 +76,12 @@ def findcauses(target, cuda, epochs, kernel_size, layers,
     firstloss = firstloss.cpu().data.item()
     for ep in range(2, epochs+1):
         scores, realloss = train(ep, X_train, Y_train, model, optimizer,log_interval,epochs)
+        if ep == 10:
+            firstloss = realloss.cpu().data.item()
     realloss = realloss.cpu().data.item()
     
     s = sorted(scores.view(-1).cpu().detach().numpy(), reverse=True)
+    print("Scores: ", s)
     indices = np.argsort(-1 *scores.view(-1).cpu().detach().numpy())
     
     #attention interpretation to find tau: the threshold that distinguishes potential causes from non-causal time series
