@@ -1,3 +1,4 @@
+from pyexpat import model
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -28,7 +29,7 @@ def preparedata(file, target):
     return x, y
 
 
-def train(epoch, traindata, traintarget, modelname, optimizer,log_interval,epochs):
+def train(epoch, traindata, traintarget, modelname: ADDSTCN, optimizer,log_interval,epochs):
     """Trains model by performing one epoch and returns attention scores and loss."""
 
     modelname.train()
@@ -38,16 +39,23 @@ def train(epoch, traindata, traintarget, modelname, optimizer,log_interval,epoch
     epochpercentage = (epoch/float(epochs))*100
     output = modelname(x)
 
-    attentionscores = modelname.fs_attention
     
-    loss = F.mse_loss(output, y)
+    loss_mse = F.mse_loss(output, y)
+    loss_lasso = modelname.attention_regularization()
+    loss = loss_mse + loss_lasso
     loss.backward()
     optimizer.step()
+    
+    # update lasso lambda
+    modelname.lasso_lambda = modelname.lasso_lambda * 0.9999#min(1e-9, modelname.lasso_lambda * 0.9999)
+    
+    attentionscores = modelname.get_attention_scores()
 
     if epoch % log_interval ==0 or epoch % epochs == 0 or epoch==1:
-        print('Epoch: {:2d} [{:.0f}%] \tLoss: {:.6f}'.format(epoch, epochpercentage, loss))
+        print('Epoch: {:2d} [{:.0f}%] \tLoss: {:.4e} - \tLambda: {:.4e}'.format(epoch, epochpercentage, loss, modelname.lasso_lambda))
+        print("Get sparsity stats: ", modelname.get_sparsity_stats())
 
-    return attentionscores.data, loss
+    return attentionscores, loss
 
 def findcauses(target, cuda, epochs, kernel_size, layers, 
                log_interval, lr, optimizername, seed, dilation_c, significance, file):
@@ -76,42 +84,51 @@ def findcauses(target, cuda, epochs, kernel_size, layers,
     firstloss = firstloss.cpu().data.item()
     for ep in range(2, epochs+1):
         scores, realloss = train(ep, X_train, Y_train, model, optimizer,log_interval,epochs)
-        if ep == 10:
-            firstloss = realloss.cpu().data.item()
+        #if ep == 10:
+        #    firstloss = realloss.cpu().data.item()
     realloss = realloss.cpu().data.item()
     
-    s = sorted(scores.view(-1).cpu().detach().numpy(), reverse=True)
-    print("Scores: ", s)
-    indices = np.argsort(-1 *scores.view(-1).cpu().detach().numpy())
+    print("Scores: ", scores)
+    print("First loss: ", firstloss, " - Real loss: ", realloss)
+    print('-'*50)
+    
+    #s = sorted(scores.view(-1).cpu().detach().numpy(), reverse=True)
+    #print("Scores: ", s)
+    #indices = np.argsort(-1 * scores.view(-1).cpu().detach().numpy()) # -1 for descending order
+    #print("Indices: ", indices)
+    
+    # get indices of scores that are greater than 0.5
+    potentials = list(np.where(scores > 0.5)[0])
     
     #attention interpretation to find tau: the threshold that distinguishes potential causes from non-causal time series
-    if len(s)<=5:
-        potentials = []
-        for i in indices:
-            if scores[i]>1.:
-                potentials.append(i)
-    else:
-        potentials = []
-        gaps = []
-        for i in range(len(s)-1):
-            if s[i]<1.: #tau should be greater or equal to 1, so only consider scores >= 1
-                break
-            gap = s[i]-s[i+1]
-            gaps.append(gap)
-        sortgaps = sorted(gaps, reverse=True)
-        
-        for i in range(0, len(gaps)):
-            largestgap = sortgaps[i]
-            index = gaps.index(largestgap)
-            ind = -1
-            if index<((len(s)-1)/2): #gap should be in first half
-                if index>0:
-                    ind=index #gap should have index > 0, except if second score <1
-                    break
-        if ind<0:
-            ind = 0
-                
-        potentials = indices[:ind+1].tolist()
+    
+    #if len(s)<=5:
+    #    potentials = []
+    #    for i in indices:
+    #        if scores[i]>1.:
+    #            potentials.append(i)
+    #else:
+    #    potentials = []
+    #    gaps = []
+    #    for i in range(len(s)-1):
+    #        if s[i]<1.: #tau should be greater or equal to 1, so only consider scores >= 1
+    #            break
+    #        gap = s[i]-s[i+1]
+    #        gaps.append(gap)
+    #    sortgaps = sorted(gaps, reverse=True)
+    #    
+    #    for i in range(0, len(gaps)):
+    #        largestgap = sortgaps[i]
+    #        index = gaps.index(largestgap)
+    #        ind = -1
+    #        if index<((len(s)-1)/2): #gap should be in first half
+    #            if index>2:
+    #                ind=index #gap should have index > 0, except if second score <1
+    #                break
+    #    if ind<0:
+    #        ind = 0
+    #            
+    #    potentials = indices[:ind+1].tolist()
     print("Potential causes: ", potentials)
     validated = copy.deepcopy(potentials)
     
@@ -130,6 +147,10 @@ def findcauses(target, cuda, epochs, kernel_size, layers,
         
         diff = firstloss-realloss
         testdiff = firstloss-testloss
+        
+        # debugging
+        print("Potential cause: ", idx, " - Test loss: ", testloss, " - Diff: ", testdiff, " - Significance: ", significance)
+        print("First loss: ", firstloss, " - Real loss: ", realloss, " - Diff: ", diff)
 
         if testdiff>(diff*significance): 
             validated.remove(idx) 
@@ -164,7 +185,7 @@ def findcauses(target, cuda, epochs, kernel_size, layers,
             causeswithdelay[(targetidx, v)]=totaldelay+1
     print("Validated causes: ", validated)
     
-    return validated, causeswithdelay, realloss, scores.view(-1).cpu().detach().numpy().tolist()
+    return validated, causeswithdelay, realloss, scores
 
 
 
